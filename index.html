@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>ACA Station + Parameter Viewer — RAW DATA (Level 0) not for reporting purposes</title>
+  <script src="https://cdn.plot.ly/plotly-2.30.0.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.39.5/dist/umd/supabase.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/choices.js/public/assets/scripts/choices.min.js"></script>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/choices.js/public/assets/styles/choices.min.css" />
+  <style>
+    body { font-family: Arial, sans-serif; padding: 20px; }
+    select { width: 300px; margin-bottom: 10px; }
+    .notice {
+      background: #fff3cd; border: 1px solid #f9d9a7; color: #5c3d00;
+      padding: 10px 14px; border-radius: 8px; margin: 0 0 16px 0; font-weight: 600;
+    }
+  </style>
+</head>
+<body>
+  <div class="notice">ACA DATA — Raw Data (Level 0) not for reporting purposes</div>
+
+  <h3>Select Stations</h3>
+  <select id="stationDropdown" multiple></select>
+
+  <h3>Select Parameters</h3>
+  <select id="parameterDropdown" multiple></select>
+
+  <h3>Select Date Range</h3>
+  <label>Start Date: <input type="date" id="startDate" /></label>
+  <label>End Date: <input type="date" id="endDate" /></label>
+
+  <div id="plot" style="width: 100%; height: 600px; margin-top: 20px;"></div>
+
+  <script type="module">
+    const SUPABASE_URL = 'https://zcunoncbyitfsilrhymv.supabase.co';
+    const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InpjdW5vbmNieWl0ZnNpbHJoeW12Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTE3Mjk3NDYsImV4cCI6MjA2NzMwNTc0Nn0._z_tqm_5UIBkWfMa7HAJrUOA-0t9vOaBVV48-74esWQ';
+    const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+    const unitsLookup = {
+      "AQHI": " ", "Ozone": "ppb", "Total Oxides of Nitrogen": "ppb",
+      "Hydrogen Sulphide": "ppb", "Total Reduced Sulphur": "ppb", "Sulphur Dioxide": "ppb",
+      "Fine Particulate Matter": "µg/m³", "Total Hydrocarbons": "ppm", "Carbon Monoxide": "ppm",
+      "Wind Direction": "degrees", "Relative Humidity": "%", "Outdoor Temperature": "°C",
+      "Nitric Oxide": "ppb", "Wind Speed": "km/hr", "Non-methane Hydrocarbons": "ppm",
+      "Nitrogen Dioxide": "ppb", "Methane": "ppm"
+    };
+
+    const shortLookup = {
+      "AQHI": "AQHI", "Ozone": "O3", "Total Oxides of Nitrogen": "NOX",
+      "Hydrogen Sulphide": "H2S", "Total Reduced Sulphur": "TRS", "Sulphur Dioxide": "SO2",
+      "Fine Particulate Matter": "PM2.5", "Total Hydrocarbons": "THC", "Carbon Monoxide": "CO",
+      "Wind Direction": "wd", "Relative Humidity": "RH", "Outdoor Temperature": "ET",
+      "Nitric Oxide": "NO", "Wind Speed": "ws", "Non-methane Hydrocarbons": "NMHC",
+      "Nitrogen Dioxide": "NO2", "Methane": "CH4"
+    };
+
+    // 1) load station & parameter lists
+    const { data: stationData, error: stationErr } = await supabase
+      .from("aqhi_data")
+      .select("StationName")
+      .neq("StationName", "")
+      .limit(5000);
+    if (stationErr) console.error(stationErr);
+
+    const stations = [...new Set((stationData || []).map(d => d.StationName))].sort();
+
+    const { data: paramData, error: paramErr } = await supabase
+      .from("aqhi_data")
+      .select("ParameterName")
+      .neq("ParameterName", "")
+      .limit(5000);
+    if (paramErr) console.error(paramErr);
+
+    const parameters = [...new Set((paramData || []).map(d => d.ParameterName))].sort();
+
+    // 2) populate dropdowns
+    const stationDropdown = document.getElementById("stationDropdown");
+    const parameterDropdown = document.getElementById("parameterDropdown");
+
+    stations.forEach(station => {
+      const opt = document.createElement("option");
+      opt.value = station; opt.textContent = station;
+      stationDropdown.appendChild(opt);
+    });
+
+    parameters.forEach(param => {
+      const opt = document.createElement("option");
+      opt.value = param; opt.textContent = param;
+      parameterDropdown.appendChild(opt);
+    });
+
+    // 3) Choices init
+    const stationChoices = new Choices(stationDropdown, { removeItemButton: true });
+    const paramChoices = new Choices(parameterDropdown, { removeItemButton: true });
+
+    // default last 7 days
+    const startEl = document.getElementById("startDate");
+    const endEl = document.getElementById("endDate");
+    startEl.valueAsDate = new Date(new Date().setDate(new Date().getDate() - 7));
+    endEl.valueAsDate = new Date();
+
+    // preselects
+    stationChoices.setChoiceByValue(["Breton", "Carrot Creek", "Drayton Valley", "Edson", "Genesee", "Hinton-Drinnan", "Hinton-Hillcrest", "Steeper", "Wagner"]);
+    paramChoices.setChoiceByValue(["Outdoor Temperature"]);
+
+    // 4) fetch + plot
+    async function fetchAndPlot() {
+      try {
+        const selectedStations = Array.from(stationDropdown.selectedOptions).map(opt => opt.value);
+        const selectedParams   = Array.from(parameterDropdown.selectedOptions).map(opt => opt.value);
+
+        // inclusive end date: make endExclusive = end + 1 day, then use .lt(endExclusive)
+        const start = new Date(startEl.value); // local midnight
+        const endExclusive = new Date(endEl.value);
+        endExclusive.setDate(endExclusive.getDate() + 1);
+
+        const startISO = start.toISOString();
+        const endISO   = endExclusive.toISOString();
+
+        const traces = [];
+
+        for (const station of selectedStations) {
+          for (const param of selectedParams) {
+            const { data, error } = await supabase
+              .from('aqhi_data')
+              .select('StationName,ParameterName,ReadingDate,Value')
+              .eq('StationName', station)
+              .eq('ParameterName', param)
+              .gte('ReadingDate', startISO)
+              .lt('ReadingDate', endISO)     // end-exclusive for full-day coverage
+              .order('ReadingDate', { ascending: true });
+
+            if (error) {
+              console.error(`Query error for ${station}/${param}:`, error);
+              continue;
+            }
+            if (!data || data.length === 0) {
+              console.warn(`No data for ${station} / ${param}`);
+              continue;
+            }
+
+            traces.push({
+              x: data.map(d => new Date(d.ReadingDate)),
+              y: data.map(d => Number(d.Value)),
+              mode: 'lines+markers',
+              name: `${shortLookup[param] || param} (${station})`,
+              text: data.map(d => {
+                const local = new Date(d.ReadingDate).toLocaleString("en-CA", {
+                  timeZone: "America/Edmonton",
+                  year: "numeric", month: "2-digit", day: "2-digit",
+                  hour: "2-digit", minute: "2-digit", second: "2-digit",
+                  hour12: false
+                });
+                return `${station}: ${d.Value} ${unitsLookup[param] || ""} @ ${local}`;
+              }),
+              hoverinfo: 'x+y+text'
+            });
+          }
+        }
+
+        Plotly.newPlot("plot", traces, {
+          title: "Parameter Time Series",
+          xaxis: { title: "Time", type: "date" },
+          yaxis: { title: "Value" },
+          margin: { t: 80 },
+          hovermode: "x unified",
+          legend: {
+            orientation: "h",
+            yanchor: "bottom",
+            y: -0.3,
+            xanchor: "center",
+            x: 0.5
+          }, // <-- comma!
+          annotations: [
+            {
+              text: "ACA DATA — for review only",
+              xref: "paper",
+              yref: "paper",
+              x: 0,
+              y: 1.18,
+              showarrow: false,
+              font: { size: 14, color: "#b00020" },
+              align: "left"
+            }
+          ]
+        });
+      } catch (e) {
+        console.error("fetchAndPlot failed:", e);
+      }
+    }
+
+    stationDropdown.addEventListener("change", fetchAndPlot);
+    parameterDropdown.addEventListener("change", fetchAndPlot);
+    startEl.addEventListener("change", fetchAndPlot);
+    endEl.addEventListener("change", fetchAndPlot);
+
+    fetchAndPlot();
+  </script>
+</body>
+</html>
